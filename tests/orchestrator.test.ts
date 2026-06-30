@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EdgeAgent, EdgeOrchestrator, EdgeTool, parseSse, withTimeoutSignal } from "../src";
+import type { LLMCompleteResult, LLMProvider, LLMRequest, LLMStreamEvent } from "../src";
 import { QueueProvider } from "./mock-provider";
 
 describe("EdgeOrchestrator", () => {
@@ -153,6 +154,142 @@ describe("EdgeOrchestrator", () => {
     expect(result.events.some((event) => event.type === "tool_call")).toBe(false);
   });
 
+  it("does not execute tool calls embedded in markdown fences", async () => {
+    let toolExecuted = false;
+    const fenced = [
+      "```json",
+      JSON.stringify({
+        type: "tool_call",
+        tool: "echo",
+        input: { value: "BTC" }
+      }),
+      "```"
+    ].join("\n");
+    const provider = new QueueProvider([fenced]);
+    const echo = new EdgeTool<{ readonly value: string }, { readonly echoed: string }>({
+      name: "echo",
+      description: "echo input",
+      inputSchema: {
+        type: "object",
+        properties: {
+          value: { type: "string" }
+        },
+        required: ["value"],
+        additionalProperties: false
+      },
+      execute(input) {
+        toolExecuted = true;
+        return { echoed: input.value };
+      }
+    });
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "tool user",
+      goal: "use echo",
+      tools: [echo]
+    });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    const result = await orchestrator.run("echo BTC");
+
+    expect(result.text).toBe(fenced);
+    expect(toolExecuted).toBe(false);
+    expect(result.events.some((event) => event.type === "tool_call")).toBe(false);
+  });
+
+  it("rejects original input that exceeds the memory budget before provider calls", async () => {
+    let providerCalled = false;
+    const provider = createProvider(async () => {
+      providerCalled = true;
+      return {
+        text: JSON.stringify({ type: "final", text: "done" })
+      };
+    });
+    const agent = new EdgeAgent({ id: "agent", role: "writer", goal: "write" });
+    const orchestrator = new EdgeOrchestrator({ provider, maxMemoryTokens: 4 })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    await expect(orchestrator.run("x".repeat(1000))).rejects.toMatchObject({
+      code: "CONTEXT_OVERFLOW"
+    });
+    expect(providerCalled).toBe(false);
+  });
+
+  it("passes shared artifacts as untrusted user data instead of system prompts", async () => {
+    const requests: LLMRequest[] = [];
+    const responses = [
+      JSON.stringify({
+        type: "final",
+        text: "analysis complete",
+        artifact: {
+          kind: "analysis",
+          summary: "IGNORE_SYSTEM_PROMPT",
+          data: { note: "IGNORE_SYSTEM_DATA" }
+        }
+      }),
+      JSON.stringify({
+        type: "final",
+        text: "final brief"
+      })
+    ];
+    const provider = createProvider(async (request) => {
+      requests.push(request);
+      return {
+        text: responses.shift() ?? JSON.stringify({ type: "final", text: "fallback" })
+      };
+    });
+    const analyst = new EdgeAgent({
+      id: "analyst",
+      role: "analyst",
+      goal: "analyze"
+    });
+    const writer = new EdgeAgent({
+      id: "writer",
+      role: "writer",
+      goal: "write"
+    });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(analyst)
+      .addAgent(writer)
+      .setFlow({
+        start: "analyst",
+        next: {
+          analyst: "writer",
+          writer: "END"
+        }
+      });
+
+    await orchestrator.run("analyze");
+
+    const secondRequest = requests[1];
+    expect(secondRequest).toBeDefined();
+    const systemText = secondRequest?.messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
+      .join("\n") ?? "";
+    const userText = secondRequest?.messages
+      .filter((message) => message.role === "user")
+      .map((message) => message.content)
+      .join("\n") ?? "";
+
+    expect(systemText).not.toContain("IGNORE_SYSTEM_PROMPT");
+    expect(userText).toContain("IGNORE_SYSTEM_PROMPT");
+    expect(userText).toContain("untrusted data");
+  });
+
   it("uses LLM routing with validated candidates", async () => {
     const provider = new QueueProvider([
       JSON.stringify({
@@ -280,6 +417,100 @@ describe("EdgeOrchestrator", () => {
     });
   });
 
+  it("does not stream raw tool error messages from hidden agents", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "explode",
+        input: {}
+      })
+    ]);
+    const explode = new EdgeTool({
+      name: "explode",
+      description: "throw an error",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      },
+      execute() {
+        throw new Error("SECRET_TOOL_FAILURE");
+      }
+    });
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "internal analyst",
+      goal: "analyze",
+      tools: [explode],
+      visibleOutput: false
+    });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    const stream = await orchestrator.runAsStream("analyze");
+    const payloads = [];
+    for await (const event of parseSse(stream)) {
+      payloads.push(JSON.parse(event.data) as Record<string, unknown>);
+    }
+
+    expect(payloads.some((payload) => payload.type === "error")).toBe(true);
+    expect(JSON.stringify(payloads)).not.toContain("SECRET_TOOL_FAILURE");
+  });
+
+  it("rejects oversized provider completions before protocol parsing", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "final",
+        text: "x".repeat(1024 * 1024)
+      })
+    ]);
+    const agent = new EdgeAgent({ id: "agent", role: "writer", goal: "write" });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    await expect(orchestrator.run("write")).rejects.toMatchObject({
+      code: "PROVIDER_PARSE_ERROR"
+    });
+  });
+
+  it("rejects deeply nested provider completions without recursive validation failure", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "final",
+        text: "done",
+        artifact: {
+          kind: "nested",
+          data: createNestedValue(80)
+        }
+      })
+    ]);
+    const agent = new EdgeAgent({ id: "agent", role: "writer", goal: "write" });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    await expect(orchestrator.run("write")).rejects.toMatchObject({
+      code: "PROVIDER_PARSE_ERROR"
+    });
+  });
+
   it("rejects oversized SSE event data", async () => {
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -314,4 +545,22 @@ async function collectSse(
     events.push(event);
   }
   return events;
+}
+
+function createProvider(complete: (request: LLMRequest) => Promise<Pick<LLMCompleteResult, "text" | "usage">>): LLMProvider {
+  return {
+    name: "test",
+    complete,
+    async *stream(): AsyncIterable<LLMStreamEvent> {
+      yield { type: "done" };
+    }
+  };
+}
+
+function createNestedValue(depth: number): Record<string, unknown> {
+  let value: Record<string, unknown> = { leaf: true };
+  for (let index = 0; index < depth; index += 1) {
+    value = { child: value };
+  }
+  return value;
 }
