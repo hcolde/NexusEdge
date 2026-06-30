@@ -48,6 +48,10 @@ export interface JsonSchemaProperty {
   readonly type: "string" | "number" | "boolean" | "object" | "array";
   readonly description?: string;
   readonly enum?: readonly JsonValue[];
+  readonly properties?: Readonly<Record<string, JsonSchemaProperty>>;
+  readonly required?: readonly string[];
+  readonly additionalProperties?: boolean;
+  readonly items?: JsonSchemaProperty;
 }
 
 export interface JsonSchemaObject {

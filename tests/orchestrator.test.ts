@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EdgeAgent, EdgeOrchestrator, EdgeTool, parseSse } from "../src";
+import { EdgeAgent, EdgeOrchestrator, EdgeTool, parseSse, withTimeoutSignal } from "../src";
 import { QueueProvider } from "./mock-provider";
 
 describe("EdgeOrchestrator", () => {
@@ -111,6 +111,48 @@ describe("EdgeOrchestrator", () => {
     expect(result.events.some((event) => event.type === "tool_result")).toBe(true);
   });
 
+  it("does not execute tool calls embedded in prose", async () => {
+    let toolExecuted = false;
+    const prose = 'Here is an example: {"type":"tool_call","tool":"echo","input":{"value":"BTC"}}';
+    const provider = new QueueProvider([prose]);
+    const echo = new EdgeTool<{ readonly value: string }, { readonly echoed: string }>({
+      name: "echo",
+      description: "echo input",
+      inputSchema: {
+        type: "object",
+        properties: {
+          value: { type: "string" }
+        },
+        required: ["value"],
+        additionalProperties: false
+      },
+      execute(input) {
+        toolExecuted = true;
+        return { echoed: input.value };
+      }
+    });
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "tool user",
+      goal: "use echo",
+      tools: [echo]
+    });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    const result = await orchestrator.run("echo BTC");
+
+    expect(result.text).toBe(prose);
+    expect(toolExecuted).toBe(false);
+    expect(result.events.some((event) => event.type === "tool_call")).toBe(false);
+  });
+
   it("uses LLM routing with validated candidates", async () => {
     const provider = new QueueProvider([
       JSON.stringify({
@@ -192,4 +234,84 @@ describe("EdgeOrchestrator", () => {
     expect(events).toContain("agent_start");
     expect(events).toContain("run_done");
   });
+
+  it("does not stream hidden agent output-bearing events", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "final",
+        text: "SECRET_HIDDEN_TEXT",
+        artifact: {
+          kind: "analysis",
+          summary: "SECRET_HIDDEN_SUMMARY",
+          data: { token: "SECRET_HIDDEN_ARTIFACT" }
+        }
+      })
+    ]);
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "internal analyst",
+      goal: "analyze",
+      visibleOutput: false
+    });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    const stream = await orchestrator.runAsStream("analyze");
+    const events = [];
+    const payloads = [];
+    for await (const event of parseSse(stream)) {
+      events.push(event.event);
+      payloads.push(JSON.parse(event.data) as Record<string, unknown>);
+    }
+
+    expect(events).not.toContain("agent_delta");
+    expect(events).not.toContain("artifact");
+    expect(events).not.toContain("agent_done");
+    expect(JSON.stringify(payloads)).not.toContain("SECRET_HIDDEN");
+    expect(payloads.find((payload) => payload.type === "run_done")).toMatchObject({
+      text: "",
+      artifacts: []
+    });
+  });
+
+  it("rejects oversized SSE event data", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: 0123456789abcdef\n\n"));
+        controller.close();
+      }
+    });
+
+    await expect(collectSse(stream, { maxEventDataChars: 8 })).rejects.toMatchObject({
+      code: "SSE_PARSE_LIMIT"
+    });
+  });
+
+  it("inherits an already-aborted source signal with positive timeouts", () => {
+    const controller = new AbortController();
+    controller.abort("client disconnected");
+
+    const timeout = withTimeoutSignal(controller.signal, 1000);
+
+    expect(timeout.signal.aborted).toBe(true);
+    expect(timeout.signal.reason).toBe("client disconnected");
+    timeout.clear();
+  });
 });
+
+async function collectSse(
+  stream: ReadableStream<Uint8Array>,
+  options?: Parameters<typeof parseSse>[1]
+): Promise<unknown[]> {
+  const events = [];
+  for await (const event of parseSse(stream, options)) {
+    events.push(event);
+  }
+  return events;
+}

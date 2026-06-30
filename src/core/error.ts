@@ -13,6 +13,7 @@ export type NexusEdgeErrorCode =
   | "PROVIDER_HTTP_ERROR"
   | "PROVIDER_STREAM_ERROR"
   | "PROVIDER_PARSE_ERROR"
+  | "SSE_PARSE_LIMIT"
   | "CONTEXT_OVERFLOW"
   | "ABORTED"
   | "UNKNOWN";

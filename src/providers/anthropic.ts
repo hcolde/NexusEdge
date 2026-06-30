@@ -176,9 +176,7 @@ function extractUsage(json: unknown): TokenUsage | undefined {
 }
 
 async function providerHttpError(response: Response): Promise<NexusEdgeError> {
-  const body = await response.text().catch(() => "");
   return new NexusEdgeError("PROVIDER_HTTP_ERROR", `Provider returned HTTP ${response.status}.`, {
-    status: response.status,
-    body: body.slice(0, 2000)
+    status: response.status
   });
 }

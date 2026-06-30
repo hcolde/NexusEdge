@@ -34,14 +34,11 @@ export function extractJsonObjectText(input: string): string | undefined {
     }
   }
 
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-
-  if (start < 0 || end <= start) {
+  if (!text.startsWith("{") || !text.endsWith("}")) {
     return undefined;
   }
 
-  return text.slice(start, end + 1);
+  return text;
 }
 
 export function parseJsonObjectFromText(input: string): ParseResult {
