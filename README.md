@@ -11,7 +11,47 @@ It uses a hybrid orchestration model:
 - native Web Streams/SSE output;
 - provider adapters implemented directly with `fetch`.
 
+## Why NexusEdge matters
+
+Most agent frameworks assume a server process, a Node.js runtime, SDK dependencies, and a large shared conversation history. That is a poor fit for OSS projects that want agentic review, triage, release, or incident workflows close to users at the edge.
+
+NexusEdge focuses on the missing edge-native layer:
+
+- small orchestration core that can run in constrained edge runtimes;
+- deterministic control flow first, with LLM routing only where semantics are needed;
+- agent-local memory shards that reduce cross-agent prompt exposure;
+- explicit handling for untrusted tool, artifact, and summary data;
+- native streams for user-facing progress without framework adapters.
+
+The goal is to make edge AI workflows easier to inspect, test, and maintain for open-source maintainers who need automation without carrying a server-heavy agent stack.
+
 ## Install
+
+The npm package metadata is prepared, but this checkout is not currently authenticated to publish `nexusedge` to the npm registry. Until the npm package is published, install from a GitHub release tarball or build from source.
+
+After the `v0.1.0` GitHub release is available:
+
+```bash
+npm install https://github.com/hcolde/NexusEdge/releases/download/v0.1.0/nexusedge-0.1.0.tgz
+```
+
+For local source usage:
+
+```bash
+git clone https://github.com/hcolde/NexusEdge.git
+cd NexusEdge
+npm ci
+npm run build
+npm pack
+```
+
+Then install the generated package tarball in another project:
+
+```bash
+npm install /path/to/nexusedge-0.1.0.tgz
+```
+
+When the package is published to npm, the standard install command will be:
 
 ```bash
 npm install nexusedge
@@ -20,7 +60,7 @@ npm install nexusedge
 For local development from this repository:
 
 ```bash
-npm install
+npm ci
 npm run ci
 ```
 
@@ -29,6 +69,18 @@ npm run ci
 The runtime library does not use Node.js APIs, external SDKs, file system access, dynamic code execution, or runtime dependencies.
 
 The `scripts/` directory uses Node.js only for development-time build and verification tasks.
+
+## Compatibility matrix
+
+| Runtime | Status | Notes |
+| --- | --- | --- |
+| Cloudflare Workers | Target runtime | Uses `fetch`, `ReadableStream`, and SSE-compatible responses. |
+| Vercel Edge Runtime | Target runtime | No Node.js runtime APIs required by the library. |
+| Deno Deploy | Target runtime | Uses Web Platform APIs and ESM. |
+| Bun | Target runtime | Example server included. |
+| Node.js | Development and tests | Build, test, benchmark, and packaging scripts run on Node.js. |
+
+Runtime constraints are enforced by `npm run check:source`, which rejects Node.js runtime imports, dynamic code execution, and other non-edge fragments in `src/`.
 
 ## Minimal example
 
@@ -195,6 +247,27 @@ The router must return:
 
 Invalid routes are rejected. If router output remains invalid after retry, the configured fallback is used.
 
+## Real examples
+
+The `examples/` directory includes smoke examples for Cloudflare Workers, Vercel Edge Runtime, Deno Deploy, and Bun.
+
+It also includes `examples/edge-incident-triage/main.ts`, a realistic edge workflow where:
+
+- a hidden collector agent fetches a bounded public status endpoint excerpt;
+- a visible responder agent writes the customer-facing update;
+- shared artifacts pass between agents without exposing hidden agent output directly;
+- the response streams as native SSE from the edge runtime.
+
+## Benchmark
+
+Run the local orchestration overhead smoke benchmark:
+
+```bash
+npm run benchmark
+```
+
+The benchmark builds the package, runs a deterministic two-agent DAG with a fixed provider, and fails if orchestration overhead exceeds the smoke-test budget. It is meant to catch accidental core-runtime regressions, not to measure provider latency.
+
 ## Public API
 
 Main exports:
@@ -214,7 +287,15 @@ Main exports:
 ## Development
 
 ```bash
-npm install
+npm ci
+npm run ci
+npm run benchmark
+npm pack --dry-run
+```
+
+Individual checks:
+
+```bash
 npm run typecheck
 npm test
 npm run build
