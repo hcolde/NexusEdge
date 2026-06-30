@@ -1,0 +1,7 @@
+name = "nexusedge-cloudflare-example"
+main = "src/index.ts"
+compatibility_date = "2026-06-27"
+
+[vars]
+# OPENAI_API_KEY should be configured as a secret:
+# wrangler secret put OPENAI_API_KEY

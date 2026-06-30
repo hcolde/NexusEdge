@@ -1,0 +1,53 @@
+{
+  "name": "nexusedge",
+  "version": "0.1.0",
+  "description": "Zero-dependency TypeScript multi-agent orchestration framework for edge runtimes.",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs"
+    },
+    "./providers/openai-compatible": {
+      "types": "./dist/providers/openai-compatible.d.ts",
+      "import": "./dist/providers/openai-compatible.mjs"
+    },
+    "./providers/anthropic": {
+      "types": "./dist/providers/anthropic.d.ts",
+      "import": "./dist/providers/anthropic.mjs"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check:source": "node scripts/check-source.mjs",
+    "build": "node scripts/build.mjs",
+    "size": "node scripts/size-check.mjs",
+    "test": "vitest run",
+    "ci": "npm run check:source && npm run typecheck && npm run test && npm run build && npm run size"
+  },
+  "keywords": [
+    "edge",
+    "agent",
+    "multi-agent",
+    "orchestration",
+    "typescript",
+    "web-streams",
+    "cloudflare-workers",
+    "vercel-edge"
+  ]
+}
