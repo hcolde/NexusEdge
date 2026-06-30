@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EdgeAgent, EdgeOrchestrator, EdgeTool, parseSse, withTimeoutSignal } from "../src";
+import { EdgeAgent, EdgeOrchestrator, EdgeTool, NexusEdgeError, parseSse, withTimeoutSignal } from "../src";
 import type { LLMCompleteResult, LLMProvider, LLMRequest, LLMStreamEvent } from "../src";
 import { QueueProvider } from "./mock-provider";
 
@@ -290,6 +290,65 @@ describe("EdgeOrchestrator", () => {
     expect(userText).toContain("untrusted data");
   });
 
+  it("passes compacted summaries as untrusted user data instead of system prompts", async () => {
+    const summaryMarker = "SUMMARY_INJECTION_MARKER";
+    const requests: LLMRequest[] = [];
+    const responses = [
+      JSON.stringify({
+        type: "final",
+        text: "analysis complete"
+      }),
+      JSON.stringify({
+        type: "final",
+        text: "done"
+      })
+    ];
+    const provider = createProvider(async (request) => {
+      requests.push(request);
+      return {
+        text: responses.shift() ?? JSON.stringify({ type: "final", text: "fallback" })
+      };
+    });
+    const summaryProvider = createProvider(async () => ({
+      text: summaryMarker
+    }));
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "analyst",
+      goal: "analyze"
+    });
+    const orchestrator = new EdgeOrchestrator({
+      provider,
+      summaryProvider,
+      maxShardTokens: 1
+    })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        mode: "fsm",
+        next: {
+          agent: ({ step }) => step === 0 ? "agent" : "END"
+        }
+      });
+
+    await orchestrator.run("analyze");
+
+    const secondRequest = requests[1];
+    expect(secondRequest).toBeDefined();
+    const systemText = secondRequest?.messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
+      .join("\n") ?? "";
+    const userText = secondRequest?.messages
+      .filter((message) => message.role === "user")
+      .map((message) => message.content)
+      .join("\n") ?? "";
+
+    expect(systemText).not.toContain(summaryMarker);
+    expect(userText).toContain(summaryMarker);
+    expect(userText).toContain("untrusted data");
+  });
+
   it("uses LLM routing with validated candidates", async () => {
     const provider = new QueueProvider([
       JSON.stringify({
@@ -461,6 +520,56 @@ describe("EdgeOrchestrator", () => {
 
     expect(payloads.some((payload) => payload.type === "error")).toBe(true);
     expect(JSON.stringify(payloads)).not.toContain("SECRET_TOOL_FAILURE");
+  });
+
+  it("does not stream hidden agent NexusEdgeError details from tools", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "explode",
+        input: {}
+      })
+    ]);
+    const explode = new EdgeTool({
+      name: "explode",
+      description: "throw a framework error",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      },
+      execute() {
+        throw new NexusEdgeError("TOOL_EXECUTION_ERROR", "SECRET_TOOL_MESSAGE", {
+          secret: "SECRET_TOOL_DETAIL"
+        });
+      }
+    });
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "internal analyst",
+      goal: "analyze",
+      tools: [explode],
+      visibleOutput: false
+    });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    const stream = await orchestrator.runAsStream("analyze");
+    const payloads = [];
+    for await (const event of parseSse(stream)) {
+      payloads.push(JSON.parse(event.data) as Record<string, unknown>);
+    }
+
+    const serialized = JSON.stringify(payloads);
+    expect(serialized).not.toContain("SECRET_TOOL_MESSAGE");
+    expect(serialized).not.toContain("SECRET_TOOL_DETAIL");
+    expect(serialized).toContain("Tool execution failed.");
   });
 
   it("rejects oversized provider completions before protocol parsing", async () => {
