@@ -16,7 +16,7 @@ export function validateJsonObject(input: JsonObject, schema?: JsonSchemaObject)
 function validateObjectShape(input: JsonObject, schema: JsonSchemaObject | JsonSchemaProperty, path: string): void {
   const required = schema.required ?? [];
   for (const key of required) {
-    if (!(key in input)) {
+    if (!hasOwn(input, key)) {
       throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Missing required tool input field: ${formatPath(path, key)}.`, {
         field: formatPath(path, key)
       });
@@ -27,7 +27,7 @@ function validateObjectShape(input: JsonObject, schema: JsonSchemaObject | JsonS
 
   if (schema.additionalProperties === false) {
     for (const key of Object.keys(input)) {
-      if (!(key in properties)) {
+      if (!hasOwn(properties, key)) {
         throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Unexpected tool input field: ${formatPath(path, key)}.`, {
           field: formatPath(path, key)
         });
@@ -36,7 +36,7 @@ function validateObjectShape(input: JsonObject, schema: JsonSchemaObject | JsonS
   }
 
   for (const [key, property] of Object.entries(properties)) {
-    if (!(key in input)) {
+    if (!hasOwn(input, key)) {
       continue;
     }
 
@@ -84,6 +84,10 @@ function matchesProperty(value: JsonValue | undefined, property: JsonSchemaPrope
 
 function formatPath(base: string, key: string): string {
   return base.length > 0 ? `${base}.${key}` : key;
+}
+
+function hasOwn(record: object, key: string): boolean {
+  return Object.hasOwn(record, key);
 }
 
 function jsonEquals(left: JsonValue, right: JsonValue | undefined): boolean {

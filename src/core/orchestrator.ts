@@ -599,7 +599,25 @@ function shouldExposeAgentOutput(agent: EdgeAgent<string>, options: RunOptions):
 function parseAgentOutput(text: string): AgentProtocolOutput {
   const parsed = parseJsonObjectFromText(text);
 
-  if (!parsed.ok || !isJsonObject(parsed.value)) {
+  if (!parsed.ok) {
+    if (parsed.code === "JSON_LIMIT") {
+      throw new NexusEdgeError("PROVIDER_PARSE_ERROR", parsed.error);
+    }
+
+    return {
+      type: "final",
+      text: text.trim(),
+      artifact: {
+        kind: "agent_result",
+        summary: truncateText(text.trim(), 240),
+        data: {
+          text: text.trim()
+        }
+      }
+    };
+  }
+
+  if (!isJsonObject(parsed.value)) {
     return {
       type: "final",
       text: text.trim(),

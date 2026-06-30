@@ -40,7 +40,7 @@ export function normalizeError(error: unknown): NexusEdgeError {
       return new NexusEdgeError("ABORTED", error.message || "The operation was aborted.");
     }
 
-    return new NexusEdgeError("UNKNOWN", error.message);
+    return new NexusEdgeError("UNKNOWN", "Unknown NexusEdge error.");
   }
 
   return new NexusEdgeError("UNKNOWN", "Unknown NexusEdge error.");
