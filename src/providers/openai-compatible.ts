@@ -1,7 +1,7 @@
 import { NexusEdgeError } from "../core/error";
 import type { EdgeMessage, LLMCompleteResult, LLMProvider, LLMRequest, LLMStreamEvent, TokenUsage } from "../core/types";
 import { parseSse } from "../streams/sse";
-import { asNumber, asReadonlyArray, asString, isJsonObject, safeJsonParse } from "../utils/json";
+import { asNumber, asReadonlyArray, asString, isJsonObject, parseJsonResponse, safeJsonParse } from "../utils/json";
 
 export interface OpenAICompatibleProviderInit {
   readonly name?: string;
@@ -37,8 +37,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
       throw await providerHttpError(response);
     }
 
-    const json: unknown = await response.json();
-    return parseOpenAIComplete(json);
+    const parsed = await parseJsonResponse(response);
+    if (!parsed.ok) {
+      throw new NexusEdgeError("PROVIDER_PARSE_ERROR", parsed.error);
+    }
+
+    return parseOpenAIComplete(parsed.value);
   }
 
   async *stream(request: LLMRequest): AsyncIterable<LLMStreamEvent> {

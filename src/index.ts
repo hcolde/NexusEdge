@@ -34,7 +34,7 @@ export { OpenAICompatibleProvider, extractOpenAIDelta, parseOpenAIComplete, toOp
 export type { OpenAICompatibleProviderInit } from "./providers/openai-compatible";
 export { AnthropicProvider, extractAnthropicDelta, parseAnthropicComplete, toAnthropicBody } from "./providers/anthropic";
 export type { AnthropicBody, AnthropicProviderInit } from "./providers/anthropic";
-export { asNumber, asReadonlyArray, asString, extractJsonObjectText, isJsonObject, isJsonValue, parseJsonObjectFromText, safeJsonParse, stableStringify, truncateText } from "./utils/json";
+export { asNumber, asReadonlyArray, asString, extractJsonObjectText, isJsonObject, isJsonValue, parseJsonObjectFromText, parseJsonResponse, safeJsonParse, stableStringify, truncateText } from "./utils/json";
 export { createId } from "./utils/id";
 export { validateJsonObject } from "./utils/schema";
 export { createAbortSignal, withTimeoutSignal } from "./utils/deadline";

@@ -78,6 +78,57 @@ describe("providers", () => {
     }
   });
 
+  it("parses OpenAI-compatible complete HTTP responses through bounded JSON parsing", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "hello"
+          }
+        }
+      ]
+    }))) as typeof fetch;
+    const provider = new OpenAICompatibleProvider({
+      baseURL: "https://provider.example",
+      apiKey: "test-key",
+      model: "test-model"
+    });
+
+    try {
+      const result = await provider.complete({ messages: [] });
+      expect(result.text).toBe("hello");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects oversized OpenAI-compatible complete HTTP responses", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: "x".repeat(1024 * 1024)
+          }
+        }
+      ]
+    }))) as typeof fetch;
+    const provider = new OpenAICompatibleProvider({
+      baseURL: "https://provider.example",
+      apiKey: "test-key",
+      model: "test-model"
+    });
+
+    try {
+      await expect(provider.complete({ messages: [] })).rejects.toMatchObject({
+        code: "PROVIDER_PARSE_ERROR"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("parses Anthropic complete responses", () => {
     const result = parseAnthropicComplete({
       content: [
@@ -141,6 +192,53 @@ describe("providers", () => {
       const details = (error as NexusEdgeError).details;
       expect(details).toEqual({ status: 400 });
       expect(JSON.stringify(details)).not.toContain("SECRET_PROVIDER_BODY");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("parses Anthropic complete HTTP responses through bounded JSON parsing", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      content: [
+        {
+          type: "text",
+          text: "hello"
+        }
+      ]
+    }))) as typeof fetch;
+    const provider = new AnthropicProvider({
+      apiKey: "test-key",
+      model: "test-model"
+    });
+
+    try {
+      const result = await provider.complete({ messages: [] });
+      expect(result.text).toBe("hello");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects oversized Anthropic complete HTTP responses", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      content: [
+        {
+          type: "text",
+          text: "x".repeat(1024 * 1024)
+        }
+      ]
+    }))) as typeof fetch;
+    const provider = new AnthropicProvider({
+      apiKey: "test-key",
+      model: "test-model"
+    });
+
+    try {
+      await expect(provider.complete({ messages: [] })).rejects.toMatchObject({
+        code: "PROVIDER_PARSE_ERROR"
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -373,12 +373,20 @@ export class EdgeOrchestrator<Ids extends string = never> {
         output = await tool.run(parsed.input, toolContext);
       } catch (error) {
         const normalized = normalizeError(error);
+        if (!agent.visibleOutput) {
+          throw new NexusEdgeError(normalized.code === "UNKNOWN" ? "TOOL_EXECUTION_ERROR" : normalized.code, "Tool execution failed.", {
+            agentId: agent.id,
+            tool: parsed.tool
+          });
+        }
+
         if (normalized.code === "UNKNOWN") {
           throw new NexusEdgeError("TOOL_EXECUTION_ERROR", normalized.message, {
             agentId: agent.id,
             tool: parsed.tool
           });
         }
+
         throw normalized;
       }
 
