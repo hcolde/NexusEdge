@@ -138,12 +138,9 @@ export class EdgeOrchestrator<Ids extends string = never> {
 
   async runAsStream(input: string, options: RunOptions = {}): Promise<ReadableStream<Uint8Array>> {
     return createSseStream(async (emit) => {
-      const visibleArtifactOwnerIds = new Set<string>();
-      let lastVisibleText = "";
-      for await (const event of this.events(input, options)) {
-        const streamEvent = this.toStreamEvent(event, options, visibleArtifactOwnerIds, (text) => {
-          lastVisibleText = text;
-        }, () => lastVisibleText);
+      const projector = this.createPublicEventProjector(options);
+      for await (const event of this.rawEvents(input, options)) {
+        const streamEvent = projector(event);
         if (streamEvent) {
           await emit(streamEvent.type, streamEvent);
         }
@@ -152,6 +149,16 @@ export class EdgeOrchestrator<Ids extends string = never> {
   }
 
   async *events(input: string, options: RunOptions = {}): AsyncIterable<RunEvent> {
+    const projector = this.createPublicEventProjector(options);
+    for await (const event of this.rawEvents(input, options)) {
+      const publicEvent = projector(event);
+      if (publicEvent) {
+        yield publicEvent;
+      }
+    }
+  }
+
+  private async *rawEvents(input: string, options: RunOptions = {}): AsyncIterable<RunEvent> {
     if (!this.flow) {
       throw new NexusEdgeError("FLOW_NOT_SET", "Flow has not been configured.");
     }
@@ -548,39 +555,38 @@ export class EdgeOrchestrator<Ids extends string = never> {
     return agent;
   }
 
-  private toStreamEvent(
-    event: RunEvent,
-    options: RunOptions,
-    visibleArtifactOwnerIds: Set<string>,
-    setLastVisibleText: (text: string) => void,
-    getLastVisibleText: () => string
-  ): RunEvent | undefined {
-    if ("agentId" in event && !shouldExposeAgentOutput(this.getAgent(event.agentId), options)) {
-      if (
-        event.type === "agent_delta" ||
-        event.type === "artifact" ||
-        event.type === "agent_done" ||
-        event.type === "tool_call" ||
-        event.type === "tool_result"
-      ) {
-        return undefined;
+  private createPublicEventProjector(options: RunOptions): (event: RunEvent) => RunEvent | undefined {
+    const visibleArtifactOwnerIds = new Set<string>();
+    let lastVisibleText = "";
+
+    return (event: RunEvent): RunEvent | undefined => {
+      if ("agentId" in event && !shouldExposeAgentOutput(this.getAgent(event.agentId), options)) {
+        if (
+          event.type === "agent_delta" ||
+          event.type === "artifact" ||
+          event.type === "agent_done" ||
+          event.type === "tool_call" ||
+          event.type === "tool_result"
+        ) {
+          return undefined;
+        }
       }
-    }
 
-    if (event.type === "artifact") {
-      visibleArtifactOwnerIds.add(event.agentId);
-    } else if (event.type === "agent_done") {
-      visibleArtifactOwnerIds.add(event.agentId);
-      setLastVisibleText(event.text);
-    } else if (event.type === "run_done") {
-      return {
-        ...event,
-        text: getLastVisibleText(),
-        artifacts: event.artifacts.filter((artifact) => visibleArtifactOwnerIds.has(artifact.ownerAgentId))
-      };
-    }
+      if (event.type === "artifact") {
+        visibleArtifactOwnerIds.add(event.agentId);
+      } else if (event.type === "agent_done") {
+        visibleArtifactOwnerIds.add(event.agentId);
+        lastVisibleText = event.text;
+      } else if (event.type === "run_done") {
+        return {
+          ...event,
+          text: lastVisibleText,
+          artifacts: event.artifacts.filter((artifact) => visibleArtifactOwnerIds.has(artifact.ownerAgentId))
+        };
+      }
 
-    return event;
+      return event;
+    };
   }
 }
 
@@ -713,8 +719,150 @@ function parseProtocolArtifact(value: JsonValue | undefined): AgentProtocolArtif
 }
 
 function serializeToolOutput(value: JsonValue, maxChars: number): string {
-  const text = typeof value === "string" ? value : stableStringify(value);
-  return truncateText(text, maxChars);
+  if (typeof value === "string") {
+    return truncateText(value, maxChars);
+  }
+
+  return boundedJsonStringify(value, {
+    maxChars,
+    maxDepth: 16,
+    maxEntries: 100
+  });
+}
+
+interface BoundedJsonStringifyOptions {
+  readonly maxChars: number;
+  readonly maxDepth: number;
+  readonly maxEntries: number;
+}
+
+function boundedJsonStringify(value: JsonValue, options: BoundedJsonStringifyOptions): string {
+  const seen = new WeakSet<object>();
+  let output = "";
+  let truncated = false;
+
+  const append = (text: string): boolean => {
+    if (output.length + text.length <= options.maxChars) {
+      output += text;
+      return true;
+    }
+
+    const remaining = options.maxChars - output.length;
+    if (remaining > 0) {
+      output += text.slice(0, remaining);
+    }
+    truncated = true;
+    return false;
+  };
+
+  const appendString = (text: string): boolean => append(JSON.stringify(truncateText(text, options.maxChars)));
+
+  const write = (item: JsonValue, depth: number): boolean => {
+    if (truncated) {
+      return false;
+    }
+
+    if (item === null) {
+      return append("null");
+    }
+
+    if (typeof item === "string") {
+      return appendString(item);
+    }
+
+    if (typeof item === "number") {
+      return append(Number.isFinite(item) ? String(item) : "null");
+    }
+
+    if (typeof item === "boolean") {
+      return append(item ? "true" : "false");
+    }
+
+    if (depth >= options.maxDepth) {
+      return appendString("[MaxDepth]");
+    }
+
+    if (Array.isArray(item)) {
+      if (seen.has(item)) {
+        return appendString("[Circular]");
+      }
+      seen.add(item);
+
+      if (!append("[")) {
+        return false;
+      }
+
+      const limit = Math.min(item.length, options.maxEntries);
+      for (let index = 0; index < limit; index += 1) {
+        if (index > 0 && !append(",")) {
+          return false;
+        }
+        if (!write(item[index] ?? null, depth + 1)) {
+          return false;
+        }
+      }
+
+      if (item.length > limit) {
+        if (limit > 0 && !append(",")) {
+          return false;
+        }
+        if (!appendString(`[Truncated ${item.length - limit} array items]`)) {
+          return false;
+        }
+      }
+
+      return append("]");
+    }
+
+    if (typeof item === "object") {
+      const record = item as Record<string, JsonValue>;
+      if (seen.has(record)) {
+        return appendString("[Circular]");
+      }
+      seen.add(record);
+
+      if (!append("{")) {
+        return false;
+      }
+
+      let count = 0;
+      let omitted = 0;
+      for (const key in record) {
+        if (!Object.prototype.hasOwnProperty.call(record, key)) {
+          continue;
+        }
+
+        if (count >= options.maxEntries) {
+          omitted += 1;
+          continue;
+        }
+
+        if (count > 0 && !append(",")) {
+          return false;
+        }
+        if (!appendString(key) || !append(":") || !write(record[key] ?? null, depth + 1)) {
+          return false;
+        }
+        count += 1;
+      }
+
+      if (omitted > 0) {
+        if (count > 0 && !append(",")) {
+          return false;
+        }
+        if (!appendString("_truncated") || !append(":") || !appendString(`${omitted} object properties`)) {
+          return false;
+        }
+      }
+
+      return append("}");
+    }
+
+    return append("null");
+  };
+
+  write(value, 0);
+  return truncated ? truncateText(`${output}…[truncated]`, options.maxChars) : output;
 }
 
 export function createNeverAbortedSignal(): AbortSignal {

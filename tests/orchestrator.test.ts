@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { EdgeAgent, EdgeOrchestrator, EdgeTool, NexusEdgeError, parseSse, withTimeoutSignal } from "../src";
+import {
+  createSseStream,
+  EdgeAgent,
+  EdgeOrchestrator,
+  EdgeTool,
+  encodeSse,
+  NexusEdgeError,
+  parseSse,
+  withTimeoutSignal
+} from "../src";
 import type { LLMCompleteResult, LLMProvider, LLMRequest, LLMStreamEvent } from "../src";
 import { QueueProvider } from "./mock-provider";
 
@@ -53,7 +62,7 @@ describe("EdgeOrchestrator", () => {
     const result = await orchestrator.run("analyze BTC");
     expect(result.text).toBe("final brief");
     expect(result.steps).toBe(2);
-    expect(result.artifacts.length).toBe(2);
+    expect(result.artifacts.length).toBe(1);
   });
 
   it("executes the JSON tool protocol", async () => {
@@ -110,6 +119,110 @@ describe("EdgeOrchestrator", () => {
     expect(result.text).toBe("tool used");
     expect(result.events.some((event) => event.type === "tool_call")).toBe(true);
     expect(result.events.some((event) => event.type === "tool_result")).toBe(true);
+  });
+
+  it("bounds object tool output before JSON serialization side effects", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "hostile",
+        input: {}
+      }),
+      JSON.stringify({
+        type: "final",
+        text: "tool used"
+      })
+    ]);
+    const hostile = new EdgeTool({
+      name: "hostile",
+      description: "return hostile object output",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      },
+      execute() {
+        return {
+          value: "safe",
+          toJSON() {
+            throw new Error("SECRET_TOJSON_FAILURE");
+          }
+        } as never;
+      }
+    });
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "tool user",
+      goal: "use hostile",
+      tools: [hostile]
+    });
+    const orchestrator = new EdgeOrchestrator({ provider, maxToolOutputChars: 80 })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    const result = await orchestrator.run("run hostile");
+    const toolResult = result.events.find((event) => event.type === "tool_result");
+
+    expect(result.text).toBe("tool used");
+    expect(toolResult).toMatchObject({
+      type: "tool_result",
+      preview: expect.stringContaining("\"value\":\"safe\"")
+    });
+    expect(JSON.stringify(result)).not.toContain("SECRET_TOJSON_FAILURE");
+  });
+
+  it("truncates large JSON tool outputs without serializing the full value", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "tool_call",
+        tool: "large",
+        input: {}
+      }),
+      JSON.stringify({
+        type: "final",
+        text: "tool used"
+      })
+    ]);
+    const large = new EdgeTool({
+      name: "large",
+      description: "return large object output",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      },
+      execute() {
+        return { items: Array.from({ length: 1000 }, (_, index) => index) } as never;
+      }
+    });
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "tool user",
+      goal: "use large",
+      tools: [large]
+    });
+    const orchestrator = new EdgeOrchestrator({ provider, maxToolOutputChars: 120 })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    const result = await orchestrator.run("run large");
+    const toolResult = result.events.find((event) => event.type === "tool_result");
+
+    expect(toolResult).toMatchObject({
+      type: "tool_result"
+    });
+    expect(toolResult?.type === "tool_result" ? toolResult.preview.length : 0).toBeLessThanOrEqual(120);
+    expect(toolResult?.type === "tool_result" ? toolResult.preview : "").not.toContain("999");
   });
 
   it("does not execute tool calls embedded in prose", async () => {
@@ -476,6 +589,91 @@ describe("EdgeOrchestrator", () => {
     });
   });
 
+  it("does not return hidden agent output-bearing events from non-stream APIs", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "final",
+        text: "SECRET_HIDDEN_TEXT",
+        artifact: {
+          kind: "analysis",
+          summary: "SECRET_HIDDEN_SUMMARY",
+          data: { token: "SECRET_HIDDEN_ARTIFACT" }
+        }
+      }),
+      JSON.stringify({
+        type: "final",
+        text: "final brief",
+        artifact: {
+          kind: "final",
+          summary: "final brief",
+          data: { text: "final brief" }
+        }
+      })
+    ]);
+    const analyst = new EdgeAgent({
+      id: "analyst",
+      role: "internal analyst",
+      goal: "analyze",
+      visibleOutput: false
+    });
+    const writer = new EdgeAgent({
+      id: "writer",
+      role: "writer",
+      goal: "write"
+    });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(analyst)
+      .addAgent(writer)
+      .setFlow({
+        start: "analyst",
+        next: {
+          analyst: "writer",
+          writer: "END"
+        }
+      });
+
+    const result = await orchestrator.run("analyze");
+
+    expect(result.text).toBe("final brief");
+    expect(result.artifacts).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("SECRET_HIDDEN");
+    expect(result.events.some((event) => event.type === "artifact" && event.agentId === "analyst")).toBe(false);
+    expect(result.events.some((event) => event.type === "agent_done" && event.agentId === "analyst")).toBe(false);
+  });
+
+  it("allows explicit all-event debug mode to include hidden agent output", async () => {
+    const provider = new QueueProvider([
+      JSON.stringify({
+        type: "final",
+        text: "SECRET_HIDDEN_TEXT",
+        artifact: {
+          kind: "analysis",
+          summary: "SECRET_HIDDEN_SUMMARY",
+          data: { token: "SECRET_HIDDEN_ARTIFACT" }
+        }
+      })
+    ]);
+    const agent = new EdgeAgent({
+      id: "agent",
+      role: "internal analyst",
+      goal: "analyze",
+      visibleOutput: false
+    });
+    const orchestrator = new EdgeOrchestrator({ provider })
+      .addAgent(agent)
+      .setFlow({
+        start: "agent",
+        next: {
+          agent: "END"
+        }
+      });
+
+    const result = await orchestrator.run("analyze", { streamMode: "all" });
+
+    expect(JSON.stringify(result)).toContain("SECRET_HIDDEN");
+    expect(result.events.some((event) => event.type === "agent_done" && event.agentId === "agent")).toBe(true);
+  });
+
   it("does not stream raw tool error messages from hidden agents", async () => {
     const provider = new QueueProvider([
       JSON.stringify({
@@ -631,6 +829,21 @@ describe("EdgeOrchestrator", () => {
     await expect(collectSse(stream, { maxEventDataChars: 8 })).rejects.toMatchObject({
       code: "SSE_PARSE_LIMIT"
     });
+  });
+
+  it("rejects SSE event names with line breaks", async () => {
+    expect(() => encodeSse("message\nevent: forged", { ok: true })).toThrow(NexusEdgeError);
+
+    const stream = createSseStream(async (emit) => {
+      await emit("message\nevent: forged", { ok: true });
+    });
+    const events = await collectSse(stream);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: "error"
+    });
+    expect(JSON.stringify(events)).not.toContain("forged");
   });
 
   it("inherits an already-aborted source signal with positive timeouts", () => {
