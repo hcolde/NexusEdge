@@ -22,8 +22,10 @@ const DEFAULT_PARSE_SSE_LIMITS: Required<ParseSseOptions> = {
 };
 
 const encoder = new TextEncoder();
+const SSE_EVENT_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 
 export function encodeSse(event: string, data: unknown): Uint8Array {
+  validateSseEventName(event);
   const payload = [`event: ${event}`, `data: ${JSON.stringify(data)}`, "", ""].join("\n");
   return encoder.encode(payload);
 }
@@ -56,6 +58,12 @@ export function createSseStream(
       }
     }
   });
+}
+
+function validateSseEventName(event: string): void {
+  if (!SSE_EVENT_NAME_PATTERN.test(event)) {
+    throw new NexusEdgeError("INVALID_SSE_EVENT", "SSE event name contains unsupported characters.");
+  }
 }
 
 export async function* parseSse(
