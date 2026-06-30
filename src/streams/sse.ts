@@ -1,4 +1,4 @@
-import { normalizeError } from "../core/error";
+import { NexusEdgeError, normalizeError } from "../core/error";
 
 export interface ParsedSseEvent {
   readonly event?: string;
@@ -6,6 +6,20 @@ export interface ParsedSseEvent {
   readonly id?: string;
   readonly retry?: number;
 }
+
+export interface ParseSseOptions {
+  readonly maxLineChars?: number;
+  readonly maxEventDataChars?: number;
+  readonly maxStreamChars?: number;
+  readonly maxEvents?: number;
+}
+
+const DEFAULT_PARSE_SSE_LIMITS: Required<ParseSseOptions> = {
+  maxLineChars: 64 * 1024,
+  maxEventDataChars: 1024 * 1024,
+  maxStreamChars: 8 * 1024 * 1024,
+  maxEvents: 10_000
+};
 
 const encoder = new TextEncoder();
 
@@ -44,22 +58,55 @@ export function createSseStream(
   });
 }
 
-export async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterable<ParsedSseEvent> {
+export async function* parseSse(
+  stream: ReadableStream<Uint8Array>,
+  options: ParseSseOptions = {}
+): AsyncIterable<ParsedSseEvent> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
+  const limits = { ...DEFAULT_PARSE_SSE_LIMITS, ...options };
   let buffer = "";
+  let streamChars = 0;
+  let eventDataChars = 0;
+  let eventCount = 0;
   let currentEvent: string | undefined;
   let currentId: string | undefined;
   let currentRetry: number | undefined;
   let dataLines: string[] = [];
+
+  const ensureWithinLimit = (value: number, limit: number, message: string): void => {
+    if (value > limit) {
+      throw new NexusEdgeError("SSE_PARSE_LIMIT", message, {
+        limit,
+        value
+      });
+    }
+  };
+
+  const addToStreamBuffer = (text: string): void => {
+    streamChars += text.length;
+    ensureWithinLimit(streamChars, limits.maxStreamChars, "SSE stream exceeded maximum size.");
+    buffer += text;
+    ensureWithinLimit(buffer.length, limits.maxLineChars, "SSE line exceeded maximum size.");
+  };
+
+  const addDataLine = (value: string): void => {
+    eventDataChars += value.length + (dataLines.length > 0 ? 1 : 0);
+    ensureWithinLimit(eventDataChars, limits.maxEventDataChars, "SSE event data exceeded maximum size.");
+    dataLines.push(value);
+  };
 
   const dispatch = (): ParsedSseEvent | undefined => {
     if (dataLines.length === 0) {
       currentEvent = undefined;
       currentId = undefined;
       currentRetry = undefined;
+      eventDataChars = 0;
       return undefined;
     }
+
+    eventCount += 1;
+    ensureWithinLimit(eventCount, limits.maxEvents, "SSE stream exceeded maximum event count.");
 
     const event: ParsedSseEvent = {
       event: currentEvent,
@@ -72,6 +119,7 @@ export async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterab
     currentId = undefined;
     currentRetry = undefined;
     dataLines = [];
+    eventDataChars = 0;
     return event;
   };
 
@@ -82,11 +130,13 @@ export async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterab
         break;
       }
 
-      buffer += decoder.decode(result.value, { stream: true });
+      addToStreamBuffer(decoder.decode(result.value, { stream: true }));
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
+      ensureWithinLimit(buffer.length, limits.maxLineChars, "SSE line exceeded maximum size.");
 
       for (const line of lines) {
+        ensureWithinLimit(line.length, limits.maxLineChars, "SSE line exceeded maximum size.");
         if (line.length === 0) {
           const event = dispatch();
           if (event) {
@@ -107,7 +157,7 @@ export async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterab
         if (field === "event") {
           currentEvent = value;
         } else if (field === "data") {
-          dataLines.push(value);
+          addDataLine(value);
         } else if (field === "id") {
           currentId = value;
         } else if (field === "retry") {
@@ -119,10 +169,11 @@ export async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterab
       }
     }
 
-    buffer += decoder.decode();
+    addToStreamBuffer(decoder.decode());
     if (buffer.length > 0) {
       const finalLines = buffer.split(/\r?\n/);
       for (const line of finalLines) {
+        ensureWithinLimit(line.length, limits.maxLineChars, "SSE line exceeded maximum size.");
         if (line.length === 0) {
           const event = dispatch();
           if (event) {
@@ -138,7 +189,7 @@ export async function* parseSse(stream: ReadableStream<Uint8Array>): AsyncIterab
         if (field === "event") {
           currentEvent = value;
         } else if (field === "data") {
-          dataLines.push(value);
+          addDataLine(value);
         }
       }
     }

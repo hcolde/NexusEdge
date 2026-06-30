@@ -29,7 +29,7 @@ export type {
 export type { EndState, FlowSpec, LLMRouteSpec, RouteFunction, RouteSpec, RouteTarget, RunView } from "./core/flow";
 export { isLlmRouteSpec, validateFlow, validateRouteTarget } from "./core/flow";
 export { createSseStream, encodeSse, parseSse } from "./streams/sse";
-export type { ParsedSseEvent } from "./streams/sse";
+export type { ParsedSseEvent, ParseSseOptions } from "./streams/sse";
 export { OpenAICompatibleProvider, extractOpenAIDelta, parseOpenAIComplete, toOpenAIMessages } from "./providers/openai-compatible";
 export type { OpenAICompatibleProviderInit } from "./providers/openai-compatible";
 export { AnthropicProvider, extractAnthropicDelta, parseAnthropicComplete, toAnthropicBody } from "./providers/anthropic";

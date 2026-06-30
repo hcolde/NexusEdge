@@ -10,11 +10,15 @@ export function validateJsonObject(input: JsonObject, schema?: JsonSchemaObject)
     throw new NexusEdgeError("TOOL_VALIDATION_ERROR", "Only object input schemas are supported.");
   }
 
+  validateObjectShape(input, schema, "");
+}
+
+function validateObjectShape(input: JsonObject, schema: JsonSchemaObject | JsonSchemaProperty, path: string): void {
   const required = schema.required ?? [];
   for (const key of required) {
     if (!(key in input)) {
-      throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Missing required tool input field: ${key}.`, {
-        field: key
+      throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Missing required tool input field: ${formatPath(path, key)}.`, {
+        field: formatPath(path, key)
       });
     }
   }
@@ -24,8 +28,8 @@ export function validateJsonObject(input: JsonObject, schema?: JsonSchemaObject)
   if (schema.additionalProperties === false) {
     for (const key of Object.keys(input)) {
       if (!(key in properties)) {
-        throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Unexpected tool input field: ${key}.`, {
-          field: key
+        throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Unexpected tool input field: ${formatPath(path, key)}.`, {
+          field: formatPath(path, key)
         });
       }
     }
@@ -36,19 +40,30 @@ export function validateJsonObject(input: JsonObject, schema?: JsonSchemaObject)
       continue;
     }
 
-    const value = input[key];
-    if (!matchesProperty(value, property)) {
-      throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Invalid type for tool input field: ${key}.`, {
-        field: key,
-        expected: property.type
-      });
-    }
+    validateProperty(input[key], property, formatPath(path, key));
+  }
+}
 
-    if (property.enum && !property.enum.some((candidate) => jsonEquals(candidate, value))) {
-      throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Invalid enum value for tool input field: ${key}.`, {
-        field: key
-      });
-    }
+function validateProperty(value: JsonValue | undefined, property: JsonSchemaProperty, path: string): void {
+  if (!matchesProperty(value, property)) {
+    throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Invalid type for tool input field: ${path}.`, {
+      field: path,
+      expected: property.type
+    });
+  }
+
+  if (property.enum && !property.enum.some((candidate) => jsonEquals(candidate, value))) {
+    throw new NexusEdgeError("TOOL_VALIDATION_ERROR", `Invalid enum value for tool input field: ${path}.`, {
+      field: path
+    });
+  }
+
+  if (property.type === "object") {
+    validateObjectShape(value as JsonObject, property, path);
+  } else if (property.type === "array" && property.items) {
+    (value as readonly JsonValue[]).forEach((item, index) => {
+      validateProperty(item, property.items as JsonSchemaProperty, `${path}[${index}]`);
+    });
   }
 }
 
@@ -65,6 +80,10 @@ function matchesProperty(value: JsonValue | undefined, property: JsonSchemaPrope
     case "object":
       return value !== null && typeof value === "object" && !Array.isArray(value);
   }
+}
+
+function formatPath(base: string, key: string): string {
+  return base.length > 0 ? `${base}.${key}` : key;
 }
 
 function jsonEquals(left: JsonValue, right: JsonValue | undefined): boolean {

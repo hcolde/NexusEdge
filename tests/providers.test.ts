@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { extractAnthropicDelta, extractOpenAIDelta, parseAnthropicComplete, parseOpenAIComplete, toAnthropicBody, toOpenAIMessages } from "../src";
+import {
+  AnthropicProvider,
+  extractAnthropicDelta,
+  extractOpenAIDelta,
+  NexusEdgeError,
+  OpenAICompatibleProvider,
+  parseAnthropicComplete,
+  parseOpenAIComplete,
+  toAnthropicBody,
+  toOpenAIMessages
+} from "../src";
 
 describe("providers", () => {
   it("parses OpenAI-compatible complete responses", () => {
@@ -44,6 +54,28 @@ describe("providers", () => {
 
     expect(messages[0]?.role).toBe("system");
     expect(messages[1]?.role).toBe("user");
+  });
+
+  it("redacts OpenAI-compatible provider error bodies", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("SECRET_PROVIDER_BODY", { status: 400 })) as typeof fetch;
+    const provider = new OpenAICompatibleProvider({
+      baseURL: "https://provider.example",
+      apiKey: "test-key",
+      model: "test-model"
+    });
+
+    try {
+      await provider.complete({ messages: [] });
+      throw new Error("Expected provider request to fail.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NexusEdgeError);
+      const details = (error as NexusEdgeError).details;
+      expect(details).toEqual({ status: 400 });
+      expect(JSON.stringify(details)).not.toContain("SECRET_PROVIDER_BODY");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("parses Anthropic complete responses", () => {
@@ -91,5 +123,26 @@ describe("providers", () => {
 
     expect(body.system).toBe("system");
     expect(body.messages.length).toBe(2);
+  });
+
+  it("redacts Anthropic provider error bodies", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("SECRET_PROVIDER_BODY", { status: 400 })) as typeof fetch;
+    const provider = new AnthropicProvider({
+      apiKey: "test-key",
+      model: "test-model"
+    });
+
+    try {
+      await provider.complete({ messages: [] });
+      throw new Error("Expected provider request to fail.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NexusEdgeError);
+      const details = (error as NexusEdgeError).details;
+      expect(details).toEqual({ status: 400 });
+      expect(JSON.stringify(details)).not.toContain("SECRET_PROVIDER_BODY");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

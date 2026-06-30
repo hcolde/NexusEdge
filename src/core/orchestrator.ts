@@ -138,8 +138,15 @@ export class EdgeOrchestrator<Ids extends string = never> {
 
   async runAsStream(input: string, options: RunOptions = {}): Promise<ReadableStream<Uint8Array>> {
     return createSseStream(async (emit) => {
+      const visibleArtifactOwnerIds = new Set<string>();
+      let lastVisibleText = "";
       for await (const event of this.events(input, options)) {
-        await emit(event.type, event);
+        const streamEvent = this.toStreamEvent(event, options, visibleArtifactOwnerIds, (text) => {
+          lastVisibleText = text;
+        }, () => lastVisibleText);
+        if (streamEvent) {
+          await emit(streamEvent.type, streamEvent);
+        }
       }
     });
   }
@@ -532,6 +539,41 @@ export class EdgeOrchestrator<Ids extends string = never> {
 
     return agent;
   }
+
+  private toStreamEvent(
+    event: RunEvent,
+    options: RunOptions,
+    visibleArtifactOwnerIds: Set<string>,
+    setLastVisibleText: (text: string) => void,
+    getLastVisibleText: () => string
+  ): RunEvent | undefined {
+    if ("agentId" in event && !shouldExposeAgentOutput(this.getAgent(event.agentId), options)) {
+      if (
+        event.type === "agent_delta" ||
+        event.type === "artifact" ||
+        event.type === "agent_done" ||
+        event.type === "tool_call" ||
+        event.type === "tool_result"
+      ) {
+        return undefined;
+      }
+    }
+
+    if (event.type === "artifact") {
+      visibleArtifactOwnerIds.add(event.agentId);
+    } else if (event.type === "agent_done") {
+      visibleArtifactOwnerIds.add(event.agentId);
+      setLastVisibleText(event.text);
+    } else if (event.type === "run_done") {
+      return {
+        ...event,
+        text: getLastVisibleText(),
+        artifacts: event.artifacts.filter((artifact) => visibleArtifactOwnerIds.has(artifact.ownerAgentId))
+      };
+    }
+
+    return event;
+  }
 }
 
 function findTool(tools: readonly EdgeTool<JsonObject, JsonValue>[], name: string): EdgeTool<JsonObject, JsonValue> | undefined {
@@ -548,6 +590,10 @@ function shouldEmitText(agent: EdgeAgent<string>, options: RunOptions): boolean 
   }
 
   return agent.visibleOutput;
+}
+
+function shouldExposeAgentOutput(agent: EdgeAgent<string>, options: RunOptions): boolean {
+  return options.streamMode === "all" || agent.visibleOutput;
 }
 
 function parseAgentOutput(text: string): AgentProtocolOutput {

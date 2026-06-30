@@ -26,8 +26,16 @@ export function withTimeoutSignal(source: AbortSignal | undefined, timeoutMs: nu
     controller.abort();
   }, timeoutMs);
 
-  const abortFromSource = (): void => controller.abort();
-  source?.addEventListener("abort", abortFromSource, { once: true });
+  const abortFromSource = (): void => controller.abort(source?.reason);
+  if (source?.aborted) {
+    abortFromSource();
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  } else {
+    source?.addEventListener("abort", abortFromSource, { once: true });
+  }
 
   return {
     signal: controller.signal,
